@@ -1,0 +1,773 @@
+#!/system/bin/sh
+# ==============================================================================
+# OP13 HiFi - USB / wired SRC bypass   --   on-device controller   v2.6
+#
+#   target : OnePlus 13 (CPH2649 / PJZ110 family) on ColorOS 16
+#            Snapdragon 8 Elite, Qualcomm AIDL audio HAL
+#   file   : /odm/etc/audio/audio_module_config_primary.xml
+#
+#   effect : the factory file is NEVER modified.  A patched copy is generated
+#            under /data/adb/op13_hifi and bind-mounted over the real file in the
+#            global (init) mount namespace, so audioserver sees it.
+#            -> unmounting the bind is a 100 % lossless restore.
+#
+#   usage  : hifi status | dac | json | rates
+#            hifi set <key> <val>        apply | restore | reset
+#            hifi preset 384k|192k|96k|44k
+#            hifi verify | log | boot | uninstall
+#
+#   runs under Magisk / KernelSU / APatch
+# ==============================================================================
+
+set -u
+
+# ------------------------------------------------------------------ self path
+SELF="$0"
+case "$SELF" in
+  /*) ;;
+  *)  SELF="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)/$(basename "$SELF")" ;;
+esac
+MODDIR="${MODDIR:-$(cd "$(dirname "$SELF")/.." 2>/dev/null && pwd)}"
+
+STATE=/data/adb/op13_hifi
+CONF="$STATE/config.conf"
+STOCK="$STATE/stock/audio_module_config_primary.xml"
+PATCHED="$STATE/patched/audio_module_config_primary.xml"
+FLAG_STOCK="$STATE/.stock_saved"
+FLAG_APPLIED="$STATE/.applied"
+LOG="$STATE/last.log"
+TMPL="$MODDIR/payload/audio_module_config_primary.xml.tmpl"
+MARKER="OP13_HIFI_SRC_BYPASS"
+
+# candidate locations, in the order OnePlus actually uses them
+TARGETS="/odm/etc/audio/audio_module_config_primary.xml \
+/vendor/etc/audio/audio_module_config_primary.xml \
+/system/vendor/etc/audio/audio_module_config_primary.xml \
+/system/etc/audio/audio_module_config_primary.xml"
+
+# ------------------------------------------------------------------- defaults
+# MIXER_RATE : 48000 = factory value (recommended)
+#              44100 = align the whole system mixer to a 44.1 kHz library
+# Every one of these must be assigned here: the script runs under `set -u`, and
+# load_conf() reads them again after sourcing the on-device config.
+MIXER_RATE=48000
+MAX_RATE=384000
+ENABLED=1
+RESTART=1
+# BIT_DEPTH : ceiling for the USB / wired output device ports.
+#   16  -> keep only INT_16_BIT
+#   24  -> keep INT_16_BIT + INT_24_BIT        (e.g. S16_LE + S24_3LE)
+#   32  -> keep all three (factory 16 bit + our 24/32)   <-- default, most permissive
+BIT_DEPTH=32
+
+# rate pools -- keep in sync with make_policy_op13.py
+DIRECT_POOL="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000 352800 384000"
+USB_POOL="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000"
+# ceilings the user may pick.  96000 = a 96k-tier DAC; 48000 = a 48k-only DAC.
+# `hifi preset auto` picks one of these automatically from what the DAC reports.
+ALL_RATES="48000 96000 176400 192000 352800 384000"
+# bit-depth ceilings the user may pick
+ALL_BITS="16 24 32"
+
+# =============================================================== small helpers
+log() {
+  line="$(date '+%Y-%m-%d %H:%M:%S') $*"
+  printf '%s\n' "$line" >> "$LOG" 2>/dev/null
+  printf '%s\n' "$line"
+}
+
+ensure_dirs() {
+  mkdir -p "$STATE/stock" "$STATE/patched" 2>/dev/null
+  chmod 0755 "$STATE" "$STATE/stock" "$STATE/patched" 2>/dev/null
+}
+
+json_escape() {
+  awk 'BEGIN{ORS=""} {gsub(/[\\]/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/," "); print $0 "\\n"}'
+}
+
+load_conf() {
+  [ -r "$CONF" ] && . "$CONF"
+  case "$MIXER_RATE" in 44100|48000) ;; *) MIXER_RATE=48000 ;; esac
+  ok=0
+  for r in $ALL_RATES; do [ "$r" = "$MAX_RATE" ] && ok=1; done
+  [ "$ok" = 1 ] || MAX_RATE=384000
+  case "$ENABLED" in 0|1) ;; *) ENABLED=1 ;; esac
+  case "$RESTART" in 0|1) ;; *) RESTART=1 ;; esac
+  ok=0
+  for b in $ALL_BITS; do [ "$b" = "$BIT_DEPTH" ] && ok=1; done
+  [ "$ok" = 1 ] || BIT_DEPTH=32
+  return 0
+}
+
+save_conf() {
+  ensure_dirs
+  cat > "$CONF" <<EOF
+# OP13 HiFi - USB SRC Bypass : settings
+# MIXER_RATE : global mixer rate. 48000 = factory (safe), 44100 = align a 44.1k library
+MIXER_RATE=$MIXER_RATE
+# MAX_RATE   : HiFi / USB direct ceiling. 384000 = high-tier DAC, 96000 = 96k tier
+MAX_RATE=$MAX_RATE
+# BIT_DEPTH  : USB / wired output bit-depth ceiling. 16 / 24 / 32 (32 = all three)
+BIT_DEPTH=$BIT_DEPTH
+# ENABLED    : 1 = patch mounted, 0 = factory policy in use
+ENABLED=$ENABLED
+# RESTART    : 1 = restart the audio stack right after applying, 0 = reboot later
+RESTART=$RESTART
+EOF
+  chmod 0644 "$CONF" 2>/dev/null
+}
+
+# --------------------------------------------------------------- target file
+target_file() {
+  for f in $TARGETS; do
+    [ -e "$f" ] && { printf '%s\n' "$f"; return 0; }
+  done
+  # last resort: search the usual roots (bounded depth, fast enough)
+  for root in /odm /vendor /system/vendor /system; do
+    [ -d "$root" ] || continue
+    hit="$(find "$root" -maxdepth 5 -name audio_module_config_primary.xml 2>/dev/null | head -n1)"
+    [ -n "$hit" ] && { printf '%s\n' "$hit"; return 0; }
+  done
+  return 1
+}
+
+is_ours() {
+  [ -r "$1" ] && grep -q "$MARKER" "$1" 2>/dev/null
+}
+
+is_mounted() {
+  awk -v t="$1" '$2 == t { found = 1 } END { exit !found }' /proc/mounts 2>/dev/null
+}
+
+# --------------------------------------------------------- global mount ns
+enter_global_ns() {
+  [ "${OP13HIFI_NS:-}" = "done" ] && return 0
+  self_ns="$(readlink /proc/self/ns/mnt 2>/dev/null)"
+  init_ns="$(readlink /proc/1/ns/mnt 2>/dev/null)"
+  if [ -n "$self_ns" ] && [ "$self_ns" = "$init_ns" ]; then
+    OP13HIFI_NS=done; export OP13HIFI_NS; return 0
+  fi
+  if command -v nsenter >/dev/null 2>&1; then
+    OP13HIFI_NS=done
+    export OP13HIFI_NS
+    exec nsenter -t 1 -m -- "$SELF" "$@"
+  fi
+  log "! cannot enter the global mount namespace, audioserver may not see the patch"
+  return 0
+}
+
+# ------------------------------------------------------------------ SELinux
+ref_context() {
+  if [ -s "$STATE/.file_context" ]; then
+    cat "$STATE/.file_context"
+    return 0
+  fi
+  t="$(target_file)" || return 1
+  d="$(dirname "$t")"
+  ref=""
+  for f in "$d"/*.xml; do
+    [ -e "$f" ] || continue
+    case "$f" in "$t") continue ;; esac
+    ref="$f"; break
+  done
+  [ -n "$ref" ] || ref="$d"
+  ctx="$(ls -Zd "$ref" 2>/dev/null | awk '{print $1}')"
+  case "$ctx" in u:*) ;; *) ctx="u:object_r:vendor_configs_file:s0" ;; esac
+  printf '%s\n' "$ctx" > "$STATE/.file_context" 2>/dev/null
+  printf '%s\n' "$ctx"
+}
+
+# ============================================================== rate helpers
+rate_list() {  # rate_list "<pool>" -> only rates <= MAX_RATE
+  out=""
+  for r in $1; do
+    [ "$r" -le "$MAX_RATE" ] 2>/dev/null && out="$out $r"
+  done
+  printf '%s' "${out# }"
+}
+
+# which devicePort profiles are live for a given bit-depth ceiling
+bitdepth_profiles() {
+  case "$1" in
+    16) printf '%s' "INT_16_BIT" ;;
+    24) printf '%s' "INT_16_BIT INT_24_BIT" ;;
+    *)  printf '%s' "INT_16_BIT INT_24_BIT INT_32_BIT" ;;
+  esac
+}
+
+# ------------------------------------------------------------- auto detect
+# pick the largest ceiling we support that does not exceed what the DAC reports
+rate_ceiling_of() {   # $1 = DAC max rate
+  picked=""
+  for r in $ALL_RATES; do
+    [ "$r" -le "${1:-0}" ] 2>/dev/null && picked="$r"
+  done
+  [ -n "$picked" ] || picked="${ALL_RATES%% *}"     # DAC below our lowest tier
+  printf '%s' "$picked"
+}
+
+# map the ALSA format list the DAC reports (e.g. S16_LE/S24_3LE) to a bit depth
+bits_of() {           # $1 = formats
+  case "$1" in
+    *S32*|*S32_3*) printf '%s' 32 ;;
+    *S24*|*S24_3*) printf '%s' 24 ;;
+    *)             printf '%s' 16 ;;
+  esac
+}
+
+# ============================================================== generate file
+generate() {
+  [ -r "$TMPL" ] || { log "! template missing: $TMPL"; return 1; }
+  ensure_dirs
+  dr="$(rate_list "$DIRECT_POOL")"
+  ur="$(rate_list "$USB_POOL")"
+  if [ "$MIXER_RATE" = "44100" ]; then spk="44100 48000"; else spk="48000"; fi
+
+  # ---------------------------------------------------------- bit depth
+  # The template keeps one token per devicePort profile line, so a bit-depth
+  # change never adds or removes a port.  A token expands either to the real
+  # profile or to an explicit XML comment, which keeps the file valid and makes
+  # the choice auditable in the generated policy itself.
+  #
+  # The expanded text still carries @USB_RATES@ on purpose: the DEV_* tokens are
+  # substituted first, and the rate substitution below then fills them in.  That
+  # way the emitted profile lines are byte-identical to the factory wording.
+  #
+  # NOTE: the replacement text must not contain '&' or the sed delimiter '|',
+  #       or use a delimiter it cannot contain.
+  dev_usb_16='<profile samplingRates="@USB_RATES@" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_16_BIT" />'
+  dev_usb_24='<profile samplingRates="@USB_RATES@" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_24_BIT" />'
+  dev_usb_32='<profile samplingRates="@USB_RATES@" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_32_BIT" />'
+  dev_an_16='<profile samplingRates="@USB_RATES@" channelLayouts="LAYOUT_STEREO" formatType="PCM" pcmType="INT_16_BIT" />'
+  dev_an_24='<profile samplingRates="@USB_RATES@" channelLayouts="LAYOUT_STEREO" formatType="PCM" pcmType="INT_24_BIT" />'
+  dev_an_32='<profile samplingRates="@USB_RATES@" channelLayouts="LAYOUT_STEREO" formatType="PCM" pcmType="INT_32_BIT" />'
+
+  off24="<!-- $MARKER: INT_24_BIT profile disabled (BIT_DEPTH=$BIT_DEPTH) -->"
+  off32="<!-- $MARKER: INT_32_BIT profile disabled (BIT_DEPTH=$BIT_DEPTH) -->"
+  case "$BIT_DEPTH" in
+    16) dev_usb_24="$off24"; dev_usb_32="$off32"
+        dev_an_24="$off24";  dev_an_32="$off32" ;;
+    24) dev_usb_32="$off32"; dev_an_32="$off32" ;;
+    *)  : ;;   # 32 = keep 16 + 24 + 32
+  esac
+
+  sed -e "s|@DEV_USB_P16@|$dev_usb_16|g" \
+      -e "s|@DEV_USB_P24@|$dev_usb_24|g" \
+      -e "s|@DEV_USB_P32@|$dev_usb_32|g" \
+      -e "s|@DEV_ANLG_P16@|$dev_an_16|g" \
+      -e "s|@DEV_ANLG_P24@|$dev_an_24|g" \
+      -e "s|@DEV_ANLG_P32@|$dev_an_32|g" \
+      -e "s|@MIXER_RATE@|$MIXER_RATE|g" \
+      -e "s|@SPK_RATES@|$spk|g" \
+      -e "s|@DIRECT_RATES@|$dr|g" \
+      -e "s|@USB_RATES@|$ur|g" \
+      -e "s|@MAX_RATE@|$MAX_RATE|g" \
+      -e "s|@BIT_DEPTH@|$BIT_DEPTH|g" \
+      "$TMPL" > "$PATCHED.tmp" 2>/dev/null || { log "! sed failed"; return 1; }
+  mv -f "$PATCHED.tmp" "$PATCHED" || return 1
+  chmod 0644 "$PATCHED" 2>/dev/null
+  chown 0:0 "$PATCHED" 2>/dev/null
+  ctx="$(ref_context)"
+  [ -n "$ctx" ] && chcon "$ctx" "$PATCHED" 2>/dev/null
+  # the generated file must still look like ours, otherwise refuse to install it
+  if ! grep -q "$MARKER" "$PATCHED" 2>/dev/null; then
+    log "! generated file lost its marker, aborting"
+    return 1
+  fi
+  # @[A-Z0-9_]*@ -- the digit matters, the bit-depth tokens end in P16/P24/P32
+  if grep -q '@[A-Z0-9_]*@' "$PATCHED" 2>/dev/null; then
+    log "! generated file still contains an unsubstituted token: $(grep -o '@[A-Z0-9_]*@' "$PATCHED" | sort -u | tr '\n' ' ')"
+    return 1
+  fi
+  # final self-check: the requested number of devicePort profiles must be live
+  want=1; [ "$BIT_DEPTH" -ge 24 ] 2>/dev/null && want=2
+  [ "$BIT_DEPTH" -ge 32 ] 2>/dev/null && want=3
+  for p in usb_device_out usb_headset wired_headset wired_headphones; do
+    got="$(sed -n "/<devicePort tagName=\"$p\"/,/<\/devicePort>/p" "$PATCHED" 2>/dev/null \
+           | grep -c 'pcmType="INT_')"
+    if [ "$got" != "$want" ]; then
+      log "! $p has $got live profile(s), expected $want for BIT_DEPTH=$BIT_DEPTH"
+      return 1
+    fi
+  done
+  log "policy generated: mixer=$MIXER_RATE direct_max=$MAX_RATE bits=$BIT_DEPTH"
+  return 0
+}
+
+# ================================================================= apply/undo
+apply_mount() {
+  t="$(target_file)" || {
+    log "! audio_module_config_primary.xml not found -- not a QTI audio device?"
+    return 1
+  }
+
+  if is_mounted "$t"; then
+    umount "$t" 2>/dev/null
+  fi
+
+  # archive the factory file exactly once, before the first bind
+  if [ ! -e "$FLAG_STOCK" ]; then
+    if is_ours "$t"; then
+      log "! a patched file is already in place, cannot archive the factory one"
+    else
+      mkdir -p "$STATE/stock" 2>/dev/null
+      if cp -f "$t" "$STOCK" 2>/dev/null; then
+        chmod 0644 "$STOCK" 2>/dev/null
+        ctx="$(ls -Zd "$t" 2>/dev/null | awk '{print $1}')"
+        case "$ctx" in u:*) printf '%s\n' "$ctx" > "$STATE/.file_context" ;; esac
+        touch "$FLAG_STOCK"
+        log "factory policy archived -> $STOCK"
+      else
+        log "! could not archive the factory policy"
+      fi
+    fi
+  fi
+
+  generate || return 1
+
+  if ! mount --bind "$PATCHED" "$t" 2>/dev/null; then
+    log "! bind mount failed: $PATCHED -> $t"
+    return 1
+  fi
+  if is_ours "$t"; then
+    touch "$FLAG_APPLIED"
+    log "active: $t"
+    return 0
+  fi
+  log "! post-mount verification failed"
+  return 1
+}
+
+undo_mount() {
+  t="$(target_file)" || return 1
+  if is_mounted "$t"; then
+    umount "$t" 2>/dev/null && log "patch unmounted: $t"
+  fi
+  # belt and braces: the bind can also be listed by source
+  for d in /proc/[0-9]*; do
+    [ -r "$d/mounts" ] || continue
+    if awk -v p="$PATCHED" '$1 == p { exit 0 } END { exit 1 }' "$d/mounts" 2>/dev/null; then
+      umount -l "$t" 2>/dev/null
+      break
+    fi
+  done
+  rm -f "$FLAG_APPLIED" 2>/dev/null
+  return 0
+}
+
+# --------------------------------------------------------------- audio stack
+kill_by_cmdline() {
+  pat="$1"
+  for d in /proc/[0-9]*; do
+    [ -r "$d/cmdline" ] || continue
+    c="$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)"
+    case "$c" in
+      *"$pat"*)
+        p="${d#/proc/}"
+        [ "$p" = "$$" ] && continue
+        kill -9 "$p" 2>/dev/null
+        ;;
+    esac
+  done
+}
+
+restart_audio() {
+  svcs="$(getprop 2>/dev/null | sed -n 's/^\[init\.svc\.\(.*\)\]: *\[.*/\1/p' | grep -i audio)"
+  log "-- restarting audio stack [${svcs:-none found}]"
+  if [ -n "$svcs" ]; then
+    for s in $svcs; do
+      case "$s" in audioserver) continue ;; esac
+      setprop ctl.restart "$s" 2>/dev/null
+    done
+    sleep 2
+    setprop ctl.restart audioserver 2>/dev/null || setprop ctl.start audioserver 2>/dev/null
+  else
+    kill_by_cmdline android.hardware.audio
+    kill_by_cmdline audioserver
+    sleep 1
+    setprop ctl.start audioserver 2>/dev/null
+  fi
+  sleep 3
+  if [ "$(getprop init.svc.audioserver)" = "running" ]; then
+    log "audioserver running"
+  else
+    log "! audioserver is not running, reboot the device to recover"
+  fi
+}
+
+# ==================================================================== reports
+usb_dac_report() {
+  cards=""
+  if [ -r /proc/asound/cards ]; then
+    cards="$(sed -n 's/^ *\([0-9][0-9]*\) .*USB.*/\1/p' /proc/asound/cards)"
+  fi
+  if [ -z "$cards" ]; then
+    for d in /proc/asound/card[0-9]*; do
+      [ -f "$d/stream0" ] || continue
+      grep -q 'at usb-' "$d/stream0" 2>/dev/null && cards="$cards ${d##*card}"
+    done
+  fi
+  [ -z "$cards" ] && return 1
+  for n in $cards; do
+    f="/proc/asound/card$n/stream0"
+    [ -r "$f" ] || continue
+    name="$(sed -n '1{s/^Card [0-9]*: //; s/ at usb.*//; p;}' "$f")"
+    [ -n "$name" ] || name="USB Audio"
+    pb="$(sed -n '/Playback:/,/Capture:/p' "$f")"
+    ch="$(printf '%s\n' "$pb" | sed -n 's/^ *Channels: *//p' | head -n1)"
+    fm="$(printf '%s\n' "$pb" | sed -n 's/^ *Format: *//p' | sort -u | tr '\n' '/')"
+    rates="$(printf '%s\n' "$pb" | sed -n 's/^ *Rates: *//p' | tr ',' '\n' | tr -d ' ' | grep -E '^[0-9]+$')"
+    max=0
+    for r in $rates; do
+      [ "$r" -gt "$max" ] 2>/dev/null && max="$r"
+    done
+    [ "$max" -gt 0 ] || continue
+    printf '%s|%s|%s|%s|%s\n' "$n" "$name" "${ch:-?}" "${fm%/}" "$max"
+  done
+}
+
+cmd_dac() {
+  if usb_dac_report > "$STATE/dac.txt" 2>/dev/null && [ -s "$STATE/dac.txt" ]; then
+    while IFS='|' read -r n name ch fm mx; do
+      printf 'USB DAC #%s  %s\n  channels: %s  formats: %s  max rate: %s Hz\n' \
+             "$n" "$name" "$ch" "$fm" "$mx"
+    done < "$STATE/dac.txt"
+  else
+    printf 'no USB audio device detected (plug your dongle in and retry)\n'
+    : > "$STATE/dac.txt"
+  fi
+}
+
+status_json() {
+  tgt="$(target_file 2>/dev/null)" || tgt=""
+  applied=0
+  [ -n "$tgt" ] && is_mounted "$tgt" 2>/dev/null && applied=1
+  backup=0
+  [ -e "$FLAG_STOCK" ] && backup=1
+  dac_name=""; dac_max="0"; dac_formats=""
+  usb_dac_report > "$STATE/dac.txt" 2>/dev/null
+  if [ -s "$STATE/dac.txt" ]; then
+    IFS='|' read -r _ dn _ dfm dm _ < "$STATE/dac.txt"
+    dac_name="${dn:-}"; dac_max="${dm:-0}"; dac_formats="${dfm:-}"
+  fi
+  ver="$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null)"
+  tail_txt="$(tail -n 12 "$LOG" 2>/dev/null | json_escape)"
+  printf '{\n'
+  printf '  "version": "%s",\n' "${ver:-?}"
+  printf '  "enabled": %s,\n' "$ENABLED"
+  printf '  "applied": %s,\n' "$applied"
+  printf '  "backup": %s,\n' "$backup"
+  printf '  "mixer_rate": %s,\n' "$MIXER_RATE"
+  printf '  "max_rate": %s,\n' "$MAX_RATE"
+  printf '  "bit_depth": %s,\n' "$BIT_DEPTH"
+  printf '  "bit_profiles": "%s",\n' "$(bitdepth_profiles "$BIT_DEPTH")"
+  printf '  "restart": %s,\n' "$RESTART"
+  printf '  "rates": [%s],\n' "$(printf '%s' "$ALL_RATES" | tr ' ' ',')"
+  printf '  "target": "%s",\n' "${tgt:-none}"
+  printf '  "dac_name": "%s",\n' "$dac_name"
+  printf '  "dac_formats": "%s",\n' "$dac_formats"
+  printf '  "dac_max": %s,\n' "${dac_max:-0}"
+  printf '  "audioserver": "%s",\n' "$(getprop init.svc.audioserver)"
+  printf '  "sdk": "%s",\n' "$(getprop ro.build.version.sdk)"
+  printf '  "device": "%s",\n' "$(getprop ro.product.device)"
+  printf '  "log_tail": "%s"\n' "$tail_txt"
+  printf '}\n'
+}
+
+# ==================================================================== commands
+do_status() {
+  tgt="$(target_file 2>/dev/null)" || tgt="not found"
+  if [ "$tgt" != "not found" ] && is_mounted "$tgt" 2>/dev/null; then
+    mnt="active  (bind-mounted)"
+  else
+    mnt="inactive (factory file in use)"
+  fi
+  ver="$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null)"
+  cat <<EOF
+OP13 HiFi - USB SRC Bypass
+  module version : ${ver:-?}
+  enabled        : $([ "$ENABLED" = 1 ] && echo yes || echo no)
+  patch mount    : $mnt
+  factory backup : $([ -e "$FLAG_STOCK" ] && echo "$STOCK" || echo "none (nothing patched yet)")
+  mixer rate     : $MIXER_RATE Hz  $([ "$MIXER_RATE" = 48000 ] && echo "(factory)")
+  direct ceiling : $MAX_RATE Hz
+  bit depth      : ${BIT_DEPTH}bit ceiling  -> $(bitdepth_profiles "$BIT_DEPTH")
+  ceilings avail : $ALL_RATES
+  bitdepth avail : $ALL_BITS
+  target file    : $tgt
+  audio service  : $(getprop init.svc.audioserver)
+  device / sdk   : $(getprop ro.product.device) / $(getprop ro.build.version.sdk)
+  lsposed/selinux: $(getenforce 2>/dev/null || echo unknown)
+EOF
+  printf '\n'
+  cmd_dac
+  printf '\n'
+  printf 'one-tap restore : hifi restore      (or the WebUI button)\n'
+  printf 'full uninstall  : remove the module in your manager, all residue is wiped\n'
+}
+
+do_boot() {
+  load_conf
+  [ "$ENABLED" = 1 ] || { log "module disabled, factory policy left untouched"; return 0; }
+  enter_global_ns boot
+  apply_mount || true
+  return 0
+}
+
+do_apply() {
+  enter_global_ns apply
+  load_conf
+  # `apply` is an explicit "turn it on": clear a previous restore and persist it,
+  # otherwise a one-tap restore would silently swallow every later apply.
+  if [ "$ENABLED" != 1 ]; then
+    ENABLED=1
+    log "enabling the patch (ENABLED=1)"
+  fi
+  apply_mount || { save_conf; return 1; }
+  save_conf
+  if [ "$RESTART" = 1 ]; then
+    restart_audio
+  else
+    log "audio restart skipped, takes effect after reboot"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------- 一键还原
+do_restore() {
+  enter_global_ns restore
+  load_conf
+  log "=== one-tap restore: going back to the factory audio policy ==="
+  undo_mount || true
+  ENABLED=0
+  save_conf
+  if [ -e "$FLAG_STOCK" ] && [ -n "$(target_file 2>/dev/null)" ]; then
+    t="$(target_file)"
+    if [ ! -e "$t" ]; then
+      log "! the target file disappeared -- restoring from the archive"
+      cp -f "$STOCK" "$t" 2>/dev/null && log "factory file written back: $t"
+    fi
+  fi
+  log "factory policy is in use again; the module stays installed but inert"
+  log "re-enable with: hifi set enabled 1 && hifi apply"
+  if [ "$RESTART" = 1 ]; then
+    restart_audio
+  else
+    log "audio restart skipped, takes effect after reboot"
+  fi
+  return 0
+}
+
+do_set() {
+  key="${1:-}"; val="${2:-}"
+  case "$key" in
+    mixer|mixer_rate)
+      case "$val" in 44100|48000) MIXER_RATE="$val" ;;
+        *) echo "mixer must be 44100 or 48000"; return 1 ;; esac ;;
+    max|max_rate)
+      ok=0
+      for r in $ALL_RATES; do [ "$r" = "$val" ] && ok=1; done
+      [ "$ok" = 1 ] || { echo "max must be one of: $ALL_RATES"; return 1; }
+      MAX_RATE="$val" ;;
+    bitdepth|bits|bit_depth)
+      ok=0
+      for b in $ALL_BITS; do [ "$b" = "$val" ] && ok=1; done
+      [ "$ok" = 1 ] || { echo "bitdepth must be one of: $ALL_BITS"; return 1; }
+      BIT_DEPTH="$val" ;;
+    enabled|enable)
+      case "$val" in 1|on|true) ENABLED=1 ;; 0|off|false) ENABLED=0 ;;
+        *) echo "enabled must be 0 or 1"; return 1 ;; esac ;;
+    restart)
+      case "$val" in 1|0) RESTART="$val" ;;
+        *) echo "restart must be 0 or 1"; return 1 ;; esac ;;
+    *) echo "unknown key: $key"; return 1 ;;
+  esac
+  save_conf
+  printf '%s = %s\n' "$key" "$val"
+  return 0
+}
+
+do_preset() {
+  case "${1:-}" in
+    auto|detect|highest)
+      # 自动识别：读小尾巴上报的最高采样率与位深，自动配到我们能给的最接近档位
+      rep="$(usb_dac_report 2>/dev/null)"
+      if [ -z "$rep" ]; then
+        echo "自动识别失败：没有检测到 USB 音频设备。"
+        echo "  请先插好小尾巴（或拔插一次），再重试；也可以手动选档位。"
+        return 1
+      fi
+      line="$(printf '%s\n' "$rep" | head -n1)"
+      dn="$(printf '%s' "$line" | cut -d'|' -f2)"
+      dfm="$(printf '%s' "$line" | cut -d'|' -f4)"
+      dmax="$(printf '%s' "$line" | cut -d'|' -f5)"
+      new_max="$(rate_ceiling_of "$dmax")"
+      new_bits="$(bits_of "$dfm")"
+      MIXER_RATE=48000; MAX_RATE="$new_max"; BIT_DEPTH="$new_bits"; ENABLED=1
+      msg="自动识别：$dn
+  上报能力 : 最高 ${dmax} Hz / $dfm
+  已配置   : 采样率上限 ${new_max} Hz / 位深 ${new_bits} bit / 混音 48000 Hz
+  （策略档位取的是"不超过解码器上报值"的最大档；位深取的是它支持的最高位深）"
+      [ "$dmax" -gt "$new_max" ] 2>/dev/null && msg="$msg
+  注意     : 解码器上报 ${dmax} Hz 高于本模块最高档 ${new_max} Hz，已按 ${new_max} Hz 配置。"
+      ;;
+    384k|cx31993|max|hifi)
+      MIXER_RATE=48000; MAX_RATE=384000; BIT_DEPTH=32; ENABLED=1
+      msg="384 kHz 满血模式 - CX31993 / 支持 384k 的 USB 小尾巴（位深 32bit）" ;;
+    192k|master|safe|compat)
+      MIXER_RATE=48000; MAX_RATE=192000; BIT_DEPTH=24; ENABLED=1
+      msg="192 kHz 超清母带 Master 档 - 上限 192k 的设备（位深 24bit）" ;;
+    96k)
+      MIXER_RATE=48000; MAX_RATE=96000; BIT_DEPTH=24; ENABLED=1
+      msg="96 kHz 高清臻音模式 - 96k/24bit 档" ;;
+    44k|44100|src)
+      MIXER_RATE=44100; MAX_RATE=384000; BIT_DEPTH=32; ENABLED=1
+      msg="44.1 kHz 全局对齐 - 曲库以 44.1k 为主时消除系统重采样" ;;
+    *)
+      echo "preset must be one of: auto | 384k | 192k | 96k | 44k"
+      echo "  auto / detect  : 自动识别小尾巴上限并配置（推荐）"
+      echo "  384k / cx31993 : MAX_RATE=384000 MIXER_RATE=48000 BIT_DEPTH=32"
+      echo "  192k / master  : MAX_RATE=192000 MIXER_RATE=48000 BIT_DEPTH=24"
+      echo "  96k           : MAX_RATE=96000  MIXER_RATE=48000 BIT_DEPTH=24"
+      echo "  44k            : MAX_RATE=384000 MIXER_RATE=44100 BIT_DEPTH=32"
+      return 1 ;;
+  esac
+  save_conf
+  echo "$msg"
+  echo "applying..."
+  do_apply
+}
+
+do_verify() {
+  t="$(target_file 2>/dev/null)" || { echo "target file not found"; return 1; }
+  echo "target        : $t"
+  if is_mounted "$t"; then echo "mount         : active"; else echo "mount         : inactive"; fi
+  if [ -r "$t" ]; then
+    echo "marker        : $(grep -c "$MARKER" "$t" 2>/dev/null)"
+    nm="$(grep -o 'name="direct_pcm_out"' "$t" 2>/dev/null | wc -l)"
+    echo "direct_pcm_out: ${nm} definition(s)"
+    dmax="$(sed -n '/name="direct_pcm_out"/,/<\/mixPort>/p' "$t" 2>/dev/null | grep -o '[0-9]\{5,6\}' | sort -n | tail -n1)"
+    echo "direct max    : ${dmax:-?} Hz"
+    umax="$(sed -n '/tagName="usb_headset"/,/<\/devicePort>/p' "$t" 2>/dev/null | grep -o '[0-9]\{5,6\}' | sort -n | tail -n1)"
+    echo "usb_headset   : ${umax:-?} Hz"
+    echo "bitdepth conf : ${BIT_DEPTH}bit ceiling -> $(bitdepth_profiles "$BIT_DEPTH")"
+    echo "--- live devicePort profiles (this is the bit-depth ceiling at work) ---"
+    for p in usb_device_out usb_headset wired_headset wired_headphones; do
+      echo "  $p : $(sed -n "/<devicePort tagName=\"$p\"/,/<\/devicePort>/p" "$t" 2>/dev/null | grep -o 'pcmType="[^"]*"' | sort -u | tr '\n' ' ')"
+    done
+    echo "  disabled markers : $(grep -c "$MARKER: INT_" "$t" 2>/dev/null)"
+    echo "max rate present : $(grep -c "$MAX_RATE" "$t" 2>/dev/null) line(s)"
+  fi
+  echo "--- host view (audioserver) ---"
+  # dumpsys 里是 `8. "direct_pcm_out"; 0x0001 (...)` —— 带引号、没有 name=，
+  # 所以不能用 XML 那套 pattern（这里曾经用错过，输出永远是空的）
+  dumpsys media.audio_policy 2>/dev/null \
+    | awk '/"direct_pcm_out"/{f=1} f && /";[[:space:]]*0x/ && !/direct_pcm_out/{exit} f' \
+    | head -n 20
+  return 0
+}
+
+# ------------------------------------------------------------------ uninstall
+# Called by the module manager right before the module directory is removed.
+# It must leave the device byte-identical to a stock one.
+do_uninstall() {
+  log "=== uninstall: removing every trace ==="
+  t="$(target_file 2>/dev/null)" || t=""
+  # 1. drop the bind mount, from the global namespace if we can reach it
+  if [ -n "$t" ]; then
+    nsenter -t 1 -m -- umount "$t" 2>/dev/null
+    is_mounted "$t" && umount "$t" 2>/dev/null
+    is_mounted "$t" && umount -l "$t" 2>/dev/null
+    # any other namespace that happens to hold it
+    for d in /proc/[0-9]*; do
+      [ -r "$d/mounts" ] || continue
+      awk -v t="$t" '$2 == t { print $2 }' "$d/mounts" 2>/dev/null | while read -r _m; do
+        nsenter -t "${d#/proc/}" -m -- umount "$t" 2>/dev/null
+      done
+    done
+    if is_mounted "$t"; then
+      log "! could not unmount $t -- REBOOT once to finish the removal"
+    else
+      log "bind mount removed, the factory file is back in use"
+    fi
+  fi
+  # 2. keep a copy of the settings in the manager log, then wipe the state dir
+  if [ -r "$CONF" ]; then
+    log "-- settings that are being removed --"
+    sed 's/^/    /' "$CONF" >> "$LOG" 2>/dev/null
+    sed 's/^/    /' "$CONF" 2>/dev/null
+    log "-- end of settings --"
+  fi
+  rm -rf "$STATE" 2>/dev/null
+  [ -e "$STATE" ] && log "! $STATE survived the wipe"
+  # 3. stray files we may have produced outside the state dir
+  rm -rf /data/local/tmp/op13_hifi* 2>/dev/null
+  rm -f /data/local/tmp/hifi* 2>/dev/null
+  rm -rf /data/adb/modules_update/op13_hifi_src_bypass 2>/dev/null
+  # 4. /odm was never written to -- assert it here so it shows up in the log
+  if [ -n "$t" ] && is_ours "$t"; then
+    log "! $t still carries the patch -- REBOOT to fall back to the factory file"
+  else
+    log "/odm left untouched (the factory file was never written to)"
+  fi
+  log "=== uninstall finished ==="
+  return 0
+}
+
+usage() {
+  cat <<EOF
+OP13 HiFi - USB SRC Bypass   v2.6
+
+  hifi status              show current state + connected DAC
+  hifi dac                 probe the connected USB dongle
+  hifi verify              inspect the live config + the audioserver view
+  hifi doctor              deep probe: is 192k REALLY running? (probe192)
+  hifi rates               list the selectable ceilings
+  hifi set mixer 44100     global mixer rate (44100 / 48000)
+  hifi set max 384000      HiFi direct ceiling (96000 - 384000)
+  hifi set bitdepth 24     USB/wired output bit-depth ceiling (16 / 24 / 32)
+  hifi set restart 1       restart the audio stack after applying (1 / 0)
+  hifi set enabled 0       boot-time intent only (advanced) -- see below
+  hifi preset auto        detect the dongle ceiling + bit depth and configure it (v2.0)
+  hifi preset 384k         CX31993 / full-fat
+  hifi preset 192k         generic 192 kHz compatibility tier (超清母带)
+  hifi preset 96k          96 kHz Hi-Res Premium tier (96 kHz / 24-bit)
+  hifi preset 44k          align the system mixer to a 44.1 kHz library
+  hifi apply               TURN ON : generate + mount, persists across reboots
+  hifi restore             TURN OFF: unmount, back to factory, module stays
+  hifi reset               alias of restore
+  hifi uninstall           manual full cleanup (normally run by the manager)
+  hifi log                 show the run log
+
+  apply / restore are the on/off pair and both update the persisted state.
+  `set enabled` only changes what the module does at the next boot; running
+  `apply` afterwards turns the patch back on.
+EOF
+}
+
+# ======================================================================= main
+case "${1:-status}" in
+  status)     ensure_dirs; load_conf; do_status ;;
+  dac)        ensure_dirs; load_conf; cmd_dac ;;
+  json)       ensure_dirs; load_conf; status_json ;;
+  rates)      printf 'ceiling options : %s\nmixer options   : 44100 48000\nbitdepth options: %s\n' \
+                     "$ALL_RATES" "$ALL_BITS" ;;
+  set)        ensure_dirs; load_conf; do_set "${2:-}" "${3:-}" ;;
+  preset)     ensure_dirs; load_conf; do_preset "${2:-}" ;;
+  apply)      ensure_dirs; load_conf; do_apply ;;
+  restore)    ensure_dirs; load_conf; do_restore ;;
+  reset)      ensure_dirs; load_conf; do_restore ;;
+  verify)     ensure_dirs; load_conf; do_verify ;;
+  doctor|probe)
+              ensure_dirs; load_conf
+              if [ -r "$MODDIR/bin/probe192.sh" ]; then
+                exec sh "$MODDIR/bin/probe192.sh"
+              else
+                echo "probe192.sh not found under $MODDIR/bin" >&2
+                exit 1
+              fi ;;
+  uninstall)  ensure_dirs; load_conf; do_uninstall ;;
+  log)        tail -n 150 "$LOG" 2>/dev/null || echo "no log yet" ;;
+  boot)       ensure_dirs; do_boot ;;
+  *)          usage ;;
+esac

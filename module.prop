@@ -1,0 +1,6 @@
+id=op13_hifi_src_bypass
+name=OP13 HiFi · USB SRC Bypass (384k)
+version=2.6
+versionCode=260
+author=立子
+description=一加13 · ColorOS 16 音频直通：解除 USB 小尾巴 / 有线耳机 HiFi 直通上限，补齐 16/24/32bit 位深（可切档），可选把全局混音采样率对齐曲库以消除 AudioFlinger 重采样(SRC)。档位 96k(高清臻音)/192k 超清母带/384k/44.1k 对齐，位深 16/24/32bit 可切，一键还原、卸载自动清理残留，内置 `hifi doctor` 四层证据校验（速览四行 + 四层证据）+ WebUI 页内一键校验。systemless 绑定挂载，原厂文件从不被改写。音频策略模板除采样率/位深 token 外未改动。

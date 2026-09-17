@@ -1,0 +1,55 @@
+--- audio_module_config_primary.xml (OP13 factory)
++++ audio_module_config_primary.xml (patched, 384k/48k/32bit)
+@@ -4,4 +4,7 @@
+ SPDX-License-Identifier: BSD-3-Clause-Clear
+ -->
++<!-- OP13_HIFI_SRC_BYPASS v2.6 : OnePlus 13 / ColorOS 16 USB HiFi SRC bypass -->
++<!-- source = OnePlus 13 factory audio_module_config_primary.xml -->
++<!-- mixer=48000 direct_max=384000 bits=32 generated, do not hand edit -->
+ <modules>
+ <module name="default">
+@@ -55,9 +58,9 @@
+         <mixPort name="direct_pcm_out" role="source" flags="DIRECT" recommendedMuteDurationMs="160">
+              <!-- #ifndef OPLUS_ARCH_EXTENDS -->
+-            <profile samplingRates="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_16_BIT" />
+-            <profile samplingRates="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="FIXED_Q_8_24" />
+-            <profile samplingRates="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_24_BIT" />
+-            <profile samplingRates="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_32_BIT" />
+-            <profile samplingRates="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="FLOAT_32_BIT" />
++            <profile samplingRates="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_16_BIT" />
++            <profile samplingRates="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="FIXED_Q_8_24" />
++            <profile samplingRates="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_24_BIT" />
++            <profile samplingRates="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_32_BIT" />
++            <profile samplingRates="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="FLOAT_32_BIT" />
+              <!-- #else /* OPLUS_ARCH_EXTENDS */
+             <profile samplingRates="8000 11025 12000 16000 22050 24000 32000 44100 48000 64000 88200 96000 128000 176400 192000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO LAYOUT_2POINT1 LAYOUT_QUAD LAYOUT_PENTA LAYOUT_5POINT1 LAYOUT_6POINT1 LAYOUT_7POINT1" formatType="PCM" pcmType="INT_16_BIT" />
+@@ -163,8 +166,12 @@
+         </devicePort>
+         <devicePort tagName="wired_headset" deviceType="OUT_HEADSET" role="sink" connection="analog">
+-            <profile samplingRates="48000" channelLayouts="LAYOUT_STEREO" formatType="PCM" pcmType="INT_16_BIT" />
++            <profile samplingRates="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_STEREO" formatType="PCM" pcmType="INT_16_BIT" />
++            <profile samplingRates="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_STEREO" formatType="PCM" pcmType="INT_24_BIT" />
++            <profile samplingRates="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_STEREO" formatType="PCM" pcmType="INT_32_BIT" />
+         </devicePort>
+         <devicePort tagName="wired_headphones" deviceType="OUT_HEADPHONE" role="sink" connection="analog">
+-            <profile samplingRates="48000" channelLayouts="LAYOUT_STEREO" formatType="PCM" pcmType="INT_16_BIT" />
++            <profile samplingRates="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_STEREO" formatType="PCM" pcmType="INT_16_BIT" />
++            <profile samplingRates="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_STEREO" formatType="PCM" pcmType="INT_24_BIT" />
++            <profile samplingRates="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_STEREO" formatType="PCM" pcmType="INT_32_BIT" />
+         </devicePort>
+         <devicePort tagName="line_out" deviceType="OUT_DEVICE" role="sink" connection="analog">
+@@ -220,8 +227,12 @@
+         </devicePort>
+         <devicePort tagName="usb_device_out" deviceType="OUT_DEVICE" connection="usb" role="sink">
+-            <profile samplingRates="44100 48000 64000 88200 96000 128000 176400 192000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_16_BIT" />
++            <profile samplingRates="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_16_BIT" />
++            <profile samplingRates="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_24_BIT" />
++            <profile samplingRates="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_32_BIT" />
+         </devicePort>
+         <devicePort tagName="usb_headset" deviceType="OUT_HEADSET" connection="usb" role="sink">
+-            <profile samplingRates="44100 48000 64000 88200 96000 128000 176400 192000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_16_BIT" />
++            <profile samplingRates="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_16_BIT" />
++            <profile samplingRates="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_24_BIT" />
++            <profile samplingRates="44100 48000 64000 88200 96000 128000 176400 192000 352800 384000" channelLayouts="LAYOUT_MONO LAYOUT_STEREO" formatType="PCM" pcmType="INT_32_BIT" />
+         </devicePort>
+         <!-- end of sink DEVICE PORT -->
