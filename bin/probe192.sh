@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ==============================================================================
-# OP13 HiFi - HiFi 直通生效验证器（采样率 + 位深）   probe192.sh   v2.6
+# OP13 HiFi - HiFi 直通生效验证器（采样率 + 位深）   probe192.sh   v2.7.1
 #
 #   用法 A（模块已装）:
 #     su -c "sh /data/adb/modules/op13_hifi_src_bypass/bin/probe192.sh"
@@ -241,6 +241,7 @@ else
     av && u { print "  "$0 }
   '
 fi
+D_DUMP_OK=no; [ -s "$DUMPF" ] && D_DUMP_OK=yes
 rm -f "$DUMPF" 2>/dev/null
 
 # =============================== 4. DAC 声明能力（证据 C：只是"支持"什么）
@@ -379,10 +380,16 @@ done
 # --- 三态判定（v2.1）：不再笼统说 closed，而是分清"检测不到"和"真的没在放" ---
 if [ "$PCM_DIRS" = 0 ]; then
   D_VERDICT="D1"
-  printf '  【D1 判定】在 %s 下找到 0 个 pcm 目录 —— 本机内核没有导出\n' "$CARD_ROOT"
-  printf '  /proc/asound/.../pcm*/sub* 这棵树。这是【内核没开这条观察通道】，\n'
-  printf '  不是模块没生效，也不是检测脚本的问题 —— 改多少版结果都一样。\n'
-  printf '  → 本机 D 层请以下面 5b 段（dumpsys，不依赖 /proc）为准。\n'
+  if [ "${D_DUMP_OK:-}" = yes ]; then
+    printf '  【D1】/proc/asound 观察通道本机不可用（0 个 pcm 目录，内核未导出）。\n'
+    printf '  → 这只是观察通道缺失，与模块是否生效无关；链路证据已由下方 5b/5c\n'
+    printf '    （dumpsys，不依赖 /proc）完整捕获 —— 直接看那两段的结论即可，此条可忽略。\n'
+  else
+    printf '  【D1 判定】在 %s 下找到 0 个 pcm 目录 —— 本机内核没有导出\n' "$CARD_ROOT"
+    printf '  /proc/asound/.../pcm*/sub* 这棵树。这是【内核没开这条观察通道】，\n'
+    printf '  不是模块没生效，也不是检测脚本的问题 —— 改多少版结果都一样。\n'
+    printf '  → 本机 D 层请以下面 5b 段（dumpsys，不依赖 /proc）为准。\n'
+  fi
 elif [ "$ANY_OPEN" = no ]; then
   D_VERDICT="D2"
   printf '  【D2 判定】找到 %s 个 pcm 目录，此刻全部 closed —— ALSA 上没有任何流。\n' "$PCM_DIRS"
@@ -404,6 +411,9 @@ fi
 printf '\n--- 5b. 当前音频路由（从 dumpsys 读，不需要 root；D1/D2 状态下以这段为准）---\n'
 D2=/data/local/tmp/.op13_probe_dump2.txt
 USBF=/data/local/tmp/.op13_probe_usb.txt
+# 活动块子集：只有 Global active count>0 的 USB 输出记录。5c 的通道判定只看它，
+# 否则待命中的 hifi_playback（设备就是 USB）会让判定误报"HIFI 通道"。
+USBF_ACTIVE=/data/local/tmp/.op13_probe_usb_active.txt
 dumpsys media.audio_policy > "$D2" 2>/dev/null
 USB_REC_N=0
 USB_ACTIVE_N=0
@@ -465,7 +475,7 @@ else
     "$(grep -c 'Global active count: [1-9]' "$D2" 2>/dev/null)"
 
   printf '  AudioTrack 客户端（谁在放、申请了什么格式/采样率，uid 已解析成包名）：\n'
-  awk '/AudioTrack clients/{c=1} c && /uid [0-9]+; State:/{print "T|"$0} c && /AUDIO_FORMAT/{print "F|"$0}' "$D2" 2>/dev/null \
+  awk '/I\/O handle:/{c=0} /AudioTrack clients/{c=1} c && /uid [0-9]+; State:/{print "T|"$0} c && /AUDIO_FORMAT/{print "F|"$0}' "$D2" 2>/dev/null \
     | sed -n '1,40p' \
     | while IFS='|' read -r k line; do
         case "$k" in
@@ -477,23 +487,35 @@ else
       done
 
   # --- 路由到 USB 的输出记录：按 "N. Port ID:" 分块，只保留含 AUDIO_DEVICE_OUT_USB 的块 ---
-  awk '
+  # 同时把活动块（Global active count>0）单独落到 USBF_ACTIVE —— 5c 通道判定只认活动块，
+  # 避免待命中的 hifi_playback/direct_pcm_out 块（设备也是 USB）把判定带偏。
+  awk -v act="$USBF_ACTIVE" '
     /^[[:space:]]*Outputs \([0-9]+\)/ { o=1; next }
     o && /^[[:space:]]*Inputs \([0-9]+\)/ { o=0 }
     o && /^[[:space:]]*[0-9]+\.[[:space:]]*Port ID:/ {
-      if (rec != "" && rec ~ /AUDIO_DEVICE_OUT_USB/) print rec "\n==END==";
+      if (rec != "" && rec ~ /AUDIO_DEVICE_OUT_USB/) {
+        print rec "\n==END=="
+        if (rec ~ /Global active count: [1-9]/) print rec > act
+      }
       rec=$0; next }
     o && rec != "" { rec = rec "\n" $0 }
-    END { if (rec != "" && rec ~ /AUDIO_DEVICE_OUT_USB/) print rec "\n==END==" }
+    END {
+      if (rec != "" && rec ~ /AUDIO_DEVICE_OUT_USB/) {
+        print rec "\n==END=="
+        if (rec ~ /Global active count: [1-9]/) print rec > act
+      }
+    }
   ' "$D2" > "$USBF" 2>/dev/null
 
   USB_REC_N="$(grep -c '^==END==$' "$USBF" 2>/dev/null)"
   case "$USB_REC_N" in ''|*[!0-9]*) USB_REC_N=0 ;; esac
   USB_ACTIVE_N="$(awk '/Global active count: [1-9]/{n++} END{print n+0}' "$USBF" 2>/dev/null)"
   case "$USB_ACTIVE_N" in ''|*[!0-9]*) USB_ACTIVE_N=0 ;; esac
-  grep -q 'direct_pcm_out' "$USBF" 2>/dev/null && USB_DIRECT=yes
-  grep -Eq 'deep_buffer_out|low_latency_out' "$USBF" 2>/dev/null && USB_MIXED=yes
-  grep -q 'hifi_playback' "$USBF" 2>/dev/null && USB_HIFI=yes
+  # 通道判定只认【活动块】：hifi_playback/direct_pcm_out 待命时其记录同样路由到 USB，
+  # 若在全量记录里 grep 会把"混音播放中"误判成"HIFI/直通"。判据 = 活动块里出现的端口名。
+  grep -q 'direct_pcm_out' "$USBF_ACTIVE" 2>/dev/null && USB_DIRECT=yes
+  grep -Eq 'deep_buffer_out|low_latency_out' "$USBF_ACTIVE" 2>/dev/null && USB_MIXED=yes
+  grep -q 'hifi_playback' "$USBF_ACTIVE" 2>/dev/null && USB_HIFI=yes
 
   printf '  路由到 USB 的输出（共 %s 条，其中活动的 %s 条；原文）：\n' "$USB_REC_N" "$USB_ACTIVE_N"
   grep -v '^==END==$' "$USBF" 2>/dev/null | sed 's/^/    /' | head -40
@@ -514,7 +536,7 @@ else
     TGT_SEEN=yes
     printf '  · 检测到【%s】有播放活动（%s）—— 它申请的格式/采样率见上面客户端段\n' "$nm" "$p"
   done
-  [ "$TGT_SEEN" = yes ] || printf '  · 本次 dump 里没有检测到网易云/QQ音乐/海贝的播放活动（没在放，或走了自带驱动独占）\n'
+  [ "$TGT_SEEN" = yes ] || printf '  · 本次 dump 里没有检测到网易云/QQ音乐/海贝的播放活动（没在放、走了自带驱动独占，或当前环境无法解析包名——参考上面客户端段的 uid 行）\n'
 
   printf '\n  链路判定：\n'
   if [ "${USBFS_N:-0}" -gt 0 ] 2>/dev/null; then
@@ -553,13 +575,15 @@ else
     fi
   fi
 
-  printf '\n  三 App「感觉不到提升」的机制原因（不是模块坏了）：\n'
-  printf '   · 网易云音乐：必须开 设置→播放→「独占 USB 输出」才走直通通道；\n'
-  printf '     不开就是混音路径，模块给不了它 24bit。\n'
-  printf '   · 海贝音乐：开「USB 独占」= 用它自带的 USB 驱动直连 DAC，完全绕过 Android\n'
-  printf '     音频栈，模块在链路外；不开 = 混音路径，同网易云。\n'
-  printf '   · QQ音乐：没有公开的独占/直通开关（以 App 版本实际为准），只能走混音路径 ——\n'
-  printf '     任何改音频策略的模块都无法给它 24bit 直通，这是 Android 机制限制。\n'
+  printf '\n  三 App「感觉不到提升」的机制原因（实测于一加 13 / ColorOS 16，不是模块坏了）：\n'
+  printf '   · 网易云音乐：【不开】「独占 USB 输出」= 走 Android 音频栈，超清母带轨道经\n'
+  printf '     hifi_playback / direct_pcm_out 输出 —— 模块在链路上，可识别、可干预\n'
+  printf '     （实测 float/192000 请求按 DAC 上限输出 24bit/96k）；【开】独占 = 自带 usbfs\n'
+  printf '     驱动直连 DAC，模块在链路外（bit-perfect，与本模块无关）。\n'
+  printf '   · 海贝音乐：同上 —— 不开「USB 独占」= 走栈（模块可干预）；开「USB 独占」=\n'
+  printf '     自带驱动直连 DAC（模块外，DAC 直接显示真实规格）。\n'
+  printf '   · QQ音乐：没有独占/直通开关，永远走混音路径 —— 位深/采样率由它自己的请求决定，\n'
+  printf '     模块能给的只有混音率对齐（免重采样）。\n'
   # ============================ 速览数据采集（第 7 段用，v2.4 新增）============================
   # 活动的音频客户端：第一条 State: Active 的 uid + 紧随其后的格式/采样率
   act_lines="$(awk '/AudioTrack clients/{c=1} c && /uid [0-9]+; State: Active/{f=1; print; next} f && /AUDIO_FORMAT/{print; exit}' "$D2" 2>/dev/null)"
@@ -624,7 +648,13 @@ printf '      既不会被本模块的上限限制，也不会被本模块帮到
 sec 7 "结论（速览 + 排查明细）"
 
 # ---------------------------------------------------------- 速览（一眼看懂）
+if [ -z "${MODDIR:-}" ]; then
+  MODDIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd)"
+fi
 mod_ver="$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -n1)"
+if [ -z "$mod_ver" ]; then
+  mod_ver="$(sed -n 's/.*OP13_HIFI_SRC_BYPASS v\([0-9.]*\) :.*/\1/p' /odm/etc/audio/audio_module_config_primary.xml 2>/dev/null | head -n1)"
+fi
 if [ "$APPLIED" = yes ]; then
   MOUNT_LINE="✅ 已挂载（v${mod_ver:-?} · 混音 ${CONFIG_MIX:-?} / 直通上限 ${CONFIG_MAX:-?} / 位深 ${CONFIG_BITS:-?}bit）"
 else
@@ -693,19 +723,24 @@ elif [ "${NOTE_RUN:-no}" = yes ]; then
 else
   printf 'USB 侧 : 此刻没有音频送往小尾巴（暂停 / 没路由 / 设备没枚举成功）\n'
 fi
-case "${NOTE_MODE:-}" in
-  android) printf '归属   : Android 音频栈（audioserver）-> 本模块在链路上\n' ;;
-  app)     printf '归属   : 疑似 App 自带 USB 驱动 -> 本模块不参与\n' ;;
-  *)
-    if [ -z "$FOUND_USB_CARD" ] && [ "${SND_N:-0}" = "0" ] && [ "${USBFS_N:-0}" = "0" ]; then
-      printf '归属   : 音频没有走 Android 音频栈（内核无 USB 声卡、驱动未绑定）\n'
-      printf '         -> 优先怀疑播放器自带 USB 驱动直连 DAC；换走 AudioTrack 的播放器复测\n'
-    else
-      printf '归属   : 待判定（先确认音乐真的在播、且走的是小尾巴）\n'
-    fi ;;
-esac
-printf '\n下一步 : 网易云开「独占 USB 输出」→ 播放中重跑本命令，看 5c 是否出现 ✓ 直通；\n'
-printf '         海贝开 USB 独占 = 自带驱动（模块外，DAC 直接显示真实规格）；\n'
-printf '         QQ音乐只能混音路径。把整段输出发回来可继续定位。\n'
+if [ "${USBFS_N:-0}" -gt 0 ] 2>/dev/null; then
+  printf '归属   : 播放器自带 USB 驱动独占（usbfs×%s）——「独占 USB 输出」开启形态，模块在链路外\n' "${USBFS_N}"
+elif [ -n "${ACT_NAME:-}" ] && [ -n "${OUT_FMT:-}" ]; then
+  printf '归属   : %s 经 %s 通道输出 %s @ %s Hz —— 链路归属明确\n' "${ACT_NAME}" "${OUT_CHAN:-USB}" "${OUT_BITS:-?}" "${OUT_RATE:-?}"
+elif [ "${USB_ACTIVE_N:-0}" -gt 0 ] 2>/dev/null; then
+  printf '归属   : 有活动 USB 输出，客户端未识别（明细见 5b 客户端段）\n'
+elif [ "${NOTE_MODE:-}" = android ]; then
+  printf '归属   : Android 音频栈（audioserver）-> 本模块在链路上\n'
+elif [ "${NOTE_MODE:-}" = app ]; then
+  printf '归属   : 疑似 App 自带 USB 驱动 -> 本模块不参与\n'
+elif [ "${NOTE_RUN:-no}" = yes ]; then
+  printf '归属   : 有 PCM 流在跑，明细见第 5 段\n'
+else
+  printf '归属   : 当前没有音频送往小尾巴 —— 播放中重跑本校验\n'
+fi
+printf '\n下一步 : 播放中重跑本命令，看速览 ④ ——\n'
+printf '         不开独占时出现 ✅ 模块生效 / ✓ HiFi 通道 / ✓ 直通 = 模块在链路上正常干预；\n'
+printf '         出现 ℹ️ usbfs 接管 = 独占已开（App 直连 DAC，模块在链路外，属正常形态）；\n'
+printf '         异常时把「排查明细」整段发回来可继续定位。\n'
 hr
 exit 0

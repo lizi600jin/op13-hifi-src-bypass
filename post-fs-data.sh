@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # ==============================================================================
 # post-fs-data : mount the patched audio policy before audioserver starts.
-# module version: v2.6
+# module version: v2.7.1
 #
 # This stage runs in the module manager's own mount namespace, so bin/hifi
 # re-execs itself through `nsenter -t 1 -m` to reach the global namespace.

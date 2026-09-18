@@ -3,7 +3,7 @@
 @@ -4,4 +4,7 @@
  SPDX-License-Identifier: BSD-3-Clause-Clear
  -->
-+<!-- OP13_HIFI_SRC_BYPASS v2.6 : OnePlus 13 / ColorOS 16 USB HiFi SRC bypass -->
++<!-- OP13_HIFI_SRC_BYPASS v2.7.1 : OnePlus 13 / ColorOS 16 USB HiFi SRC bypass -->
 +<!-- source = OnePlus 13 factory audio_module_config_primary.xml -->
 +<!-- mixer=48000 direct_max=384000 bits=32 generated, do not hand edit -->
  <modules>

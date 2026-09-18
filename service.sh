@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # ==============================================================================
 # late_start service : safety net.
-# module version: v2.6
+# module version: v2.7.1
 #
 # Some ColorOS builds remount /odm after post-fs-data, which silently drops the
 # bind mount.  Wait for boot_completed + audioserver, then verify once and
