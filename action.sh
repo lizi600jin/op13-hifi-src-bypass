@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # ==============================================================================
 # Action button (Magisk / KernelSU / APatch)
-# module version: v2.7.1
+# module version: v2.7.2
 #
 #   not applied  ->  apply the patch
 #   applied      ->  ONE-TAP RESTORE, back to the factory audio policy

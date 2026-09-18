@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ==============================================================================
-# OP13 HiFi - USB SRC Bypass   v2.7.1   uninstall.sh
+# OP13 HiFi - USB SRC Bypass   v2.7.2   uninstall.sh
 #
 # Executed by Magisk / KernelSU / APatch right before the module directory is
 # deleted.  Goal: leave the device byte-identical to a stock one.

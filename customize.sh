@@ -1,13 +1,13 @@
 #!/system/bin/sh
 # ==============================================================================
-# OP13 HiFi - USB SRC Bypass   v2.7.1   installer
+# OP13 HiFi - USB SRC Bypass   v2.7.2   installer
 # ------------------------------------------------------------------------------
 # Runs under Magisk / KernelSU / APatch.
 # On an *update* the user settings in /data/adb/op13_hifi/config.conf are kept.
 # ==============================================================================
 
 ui_print "***************************************************"
-ui_print "  OP13 HiFi - USB SRC Bypass   v2.7.1"
+ui_print "  OP13 HiFi - USB SRC Bypass   v2.7.2"
 ui_print "  OnePlus 13 . ColorOS 16 . QTI AIDL audio"
 ui_print "***************************************************"
 

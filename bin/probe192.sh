@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ==============================================================================
-# OP13 HiFi - HiFi 直通生效验证器（采样率 + 位深）   probe192.sh   v2.7.1
+# OP13 HiFi - HiFi 直通生效验证器（采样率 + 位深）   probe192.sh   v2.7.2
 #
 #   用法 A（模块已装）:
 #     su -c "sh /data/adb/modules/op13_hifi_src_bypass/bin/probe192.sh"
@@ -155,6 +155,9 @@ done
 printf '\n'
 
 # ============================================= 2. 各端口上限（证据 A：配置层）
+# USB 端口在生效文件里的最高位深（App 层 FLOAT 开流时，真实写 USB 的位深受生效
+# profile 交集约束 —— 速览③据此把 FLOAT 换算成实际输出位深；set -u 需先初始化）
+USB_POLICY_BITS=""
 sec 2 "生效文件里的上限（证据 A：配置层）"
 if [ -n "$POLICY" ]; then
   printf '配置(config.conf) : 混音 %s Hz / 采样率上限 %s Hz / 位深上限 %s bit\n' \
@@ -177,13 +180,23 @@ if [ -n "$POLICY" ]; then
   done
   for p in usb_headset usb_device_out; do
     got="$(dev_block "$POLICY" "$p" | live_pcms)"
-    if [ "$got" = "$WANT_PCMS" ]; then
-      printf '  -> %-14s 与 BIT_DEPTH=%s 一致  OK\n' "$p" "${CONFIG_BITS:-32}"
+    if [ -z "$CONFIG_BITS" ]; then
+      printf '  -> %-14s config.conf 不可读，跳过期望比对（以上面生效列表为准）\n' "$p"
+    elif [ "$got" = "$WANT_PCMS" ]; then
+      printf '  -> %-14s 与 BIT_DEPTH=%s 一致  OK\n' "$p" "$CONFIG_BITS"
     else
       printf '  -> %-14s 与 BIT_DEPTH=%s 不一致！期望 [%s] 实际 [%s]\n' \
-        "$p" "${CONFIG_BITS:-32}" "$WANT_PCMS" "$got"
+        "$p" "$CONFIG_BITS" "$WANT_PCMS" "$got"
     fi
   done
+  # FLOAT 开流的位深换算基准：usb_headset 的最高生效位深
+  # （policy 里没有 FLOAT/更高位 profile 时，HAL 写 USB 必然按这里的最高位打包）
+  usb_live="$(dev_block "$POLICY" usb_headset | live_pcms)"
+  case "$usb_live" in
+    *INT_32_BIT*) USB_POLICY_BITS=32 ;;
+    *INT_24_BIT*) USB_POLICY_BITS=24 ;;
+    *INT_16_BIT*) USB_POLICY_BITS=16 ;;
+  esac
 else
   printf '跳过\n'
 fi
@@ -449,9 +462,17 @@ app_name_of() {
   esac
 }
 # 把 AUDIO_FORMAT_* 翻译成人话（速览用）
+# FLOAT 是 App 层容器格式（容器宽 32bit），真实写 USB 的位深受生效 profile 交集约束：
+# 若生效文件里 USB 端口最高只有 24bit，则 FLOAT 开流实际按 24bit 输出 —— 不能再显示 float(32bit)
 bits_of_fmt() {
   case "$1" in
-    *FLOAT*)       printf 'float(32bit)' ;;
+    *FLOAT*)
+      case "${USB_POLICY_BITS:-}" in
+        32) printf 'float(32bit)' ;;
+        24) printf '24bit (float 容器)' ;;
+        16) printf '16bit (float 容器)' ;;
+        *)  printf 'float 容器' ;;
+      esac ;;
     *32_BIT*)      printf '32bit' ;;
     *8_24_BIT*|*24_BIT*) printf '24bit' ;;
     *16_BIT*)      printf '16bit' ;;

@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ==============================================================================
-# OP13 HiFi - USB / wired SRC bypass   --   on-device controller   v2.7.1
+# OP13 HiFi - USB / wired SRC bypass   --   on-device controller   v2.7.2
 #
 #   target : OnePlus 13 (CPH2649 / PJZ110 family) on ColorOS 16
 #            Snapdragon 8 Elite, Qualcomm AIDL audio HAL
@@ -716,7 +716,7 @@ do_uninstall() {
 
 usage() {
   cat <<EOF
-OP13 HiFi - USB SRC Bypass   v2.7.1
+OP13 HiFi - USB SRC Bypass   v2.7.2
 
   hifi status              show current state + connected DAC
   hifi dac                 probe the connected USB dongle
