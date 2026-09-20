@@ -1,5 +1,5 @@
 # OP13 HiFi · USB SRC Bypass
- ### ⛔ 此模块**已停止更新与维护** 项目合并至https://github.com/lizi600jin/hifi-src-bypass一同维护更新
+ ### ⛔ 此模块**已停止更新与维护** 项目合并至** https://github.com/lizi600jin/hifi-src-bypass ** 一同维护更新
 
 > 一加 13 / ColorOS 16 · Qualcomm AIDL 音频 · systemless 模块
 > USB 小尾巴 / 有线耳机高解析直通：**采样率上限 96k–384k 可选、位深 16/24/32bit 可切**、
